@@ -1,0 +1,198 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, 'claude/**' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-validate:
+    name: Build and Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Validate repository structure
+        run: |
+          echo "Validating repository structure..."
+
+          # Check for essential directories
+          dirs=("docs" ".github/workflows")
+          for dir in "${dirs[@]}"; do
+            if [ ! -d "$dir" ]; then
+              echo "❌ Missing directory: $dir"
+              exit 1
+            else
+              echo "✅ Directory exists: $dir"
+            fi
+          done
+
+      - name: Count documentation files
+        run: |
+          echo "Documentation Statistics:"
+          echo "========================"
+
+          md_count=$(find . -name "*.md" -not -path "./node_modules/*" | wc -l)
+          echo "Total Markdown files: $md_count"
+
+          docs_count=$(find docs/ -name "*.md" 2>/dev/null | wc -l || echo "0")
+          echo "Documentation files: $docs_count"
+
+          # Calculate total lines of documentation
+          total_lines=$(find . -name "*.md" -not -path "./node_modules/*" -exec wc -l {} + | tail -1 | awk '{print $1}')
+          echo "Total lines of documentation: $total_lines"
+
+      - name: Verify metadata
+        run: |
+          echo "Verifying document metadata..."
+
+          # Check PRD version and dates
+          if [ -f "docs/PRD.md" ]; then
+            if grep -q "version:" docs/PRD.md && grep -q "date:" docs/PRD.md; then
+              echo "✅ PRD metadata valid"
+            else
+              echo "❌ PRD missing required metadata"
+              exit 1
+            fi
+          fi
+
+      - name: Check for broken internal links
+        run: |
+          echo "Checking for broken internal links..."
+
+          # Find all markdown files
+          md_files=$(find . -name "*.md" -not -path "./node_modules/*")
+
+          broken_links=0
+
+          for file in $md_files; do
+            # Extract markdown links [text](path)
+            links=$(grep -oP '\[.*?\]\(\K[^)]+' "$file" || true)
+
+            for link in $links; do
+              # Skip external links (http/https)
+              if [[ $link == http* ]]; then
+                continue
+              fi
+
+              # Skip anchors
+              if [[ $link == \#* ]]; then
+                continue
+              fi
+
+              # Get the directory of the current file
+              dir=$(dirname "$file")
+
+              # Resolve relative path
+              target="$dir/$link"
+
+              # Check if file exists
+              if [ ! -f "$target" ] && [ ! -d "$target" ]; then
+                echo "❌ Broken link in $file: $link"
+                broken_links=$((broken_links + 1))
+              fi
+            done
+          done
+
+          if [ $broken_links -gt 0 ]; then
+            echo "Found $broken_links broken internal link(s)"
+            echo "⚠️ Warning: Broken links detected (not failing build)"
+          else
+            echo "✅ No broken internal links found"
+          fi
+
+      - name: Generate documentation report
+        run: |
+          echo "# Documentation Quality Report" > report.md
+          echo "" >> report.md
+          echo "Generated on: $(date)" >> report.md
+          echo "" >> report.md
+          echo "## Statistics" >> report.md
+          echo "" >> report.md
+          echo "- Total Markdown files: $(find . -name "*.md" -not -path "./node_modules/*" | wc -l)" >> report.md
+          echo "- Total lines: $(find . -name "*.md" -not -path "./node_modules/*" -exec wc -l {} + | tail -1 | awk '{print $1}')" >> report.md
+          echo "" >> report.md
+          echo "## Files" >> report.md
+          echo "" >> report.md
+          find . -name "*.md" -not -path "./node_modules/*" | sort >> report.md
+
+          cat report.md
+
+      - name: Upload documentation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-report
+          path: report.md
+          retention-days: 30
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  accessibility-check:
+    name: Accessibility Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for accessibility considerations
+        run: |
+          echo "Checking documentation for accessibility..."
+
+          # Check for alt text in images
+          files_without_alt=0
+
+          md_files=$(find . -name "*.md" -not -path "./node_modules/*")
+
+          for file in $md_files; do
+            # Find images without alt text: ![](url)
+            if grep -q '!\[\](' "$file"; then
+              echo "⚠️ $file contains images without alt text"
+              files_without_alt=$((files_without_alt + 1))
+            fi
+          done
+
+          if [ $files_without_alt -gt 0 ]; then
+            echo "ℹ️ Found $files_without_alt file(s) with images missing alt text"
+          else
+            echo "✅ All images have alt text"
+          fi

@@ -1,0 +1,160 @@
+name: Release Documentation
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          echo "Generating changelog..."
+
+          # Get the previous tag
+          PREVIOUS_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous tag found, using all commits"
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            echo "Comparing with previous tag: $PREVIOUS_TAG"
+            COMMITS=$(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # Save changelog to file
+          echo "# Changelog" > CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "## ${{ steps.get_version.outputs.version }}" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "$COMMITS" >> CHANGELOG.md
+
+          # Show changelog
+          cat CHANGELOG.md
+
+      - name: Create documentation archive
+        run: |
+          echo "Creating documentation archive..."
+
+          # Create a zip file of all documentation
+          zip -r documentation-${{ steps.get_version.outputs.version }}.zip \
+            docs/ \
+            README.md \
+            -x "*.git*"
+
+          echo "Archive created successfully"
+          ls -lh documentation-${{ steps.get_version.outputs.version }}.zip
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: Documentation Release ${{ steps.get_version.outputs.version }}
+          body_path: CHANGELOG.md
+          files: |
+            documentation-${{ steps.get_version.outputs.version }}.zip
+            CHANGELOG.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update documentation version
+        run: |
+          echo "Documentation version ${{ steps.get_version.outputs.version }} released successfully!"
+
+  publish-pages:
+    name: Publish to GitHub Pages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Build documentation site
+        run: |
+          mkdir -p _site
+          cp -r docs/* _site/
+          cp README.md _site/index.md
+
+          # Create a simple index.html
+          cat > _site/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Codeflow Documentation</title>
+            <style>
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 20px;
+                line-height: 1.6;
+              }
+              h1 { color: #333; }
+              a { color: #0066cc; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .doc-list { list-style: none; padding: 0; }
+              .doc-list li { padding: 10px; border-bottom: 1px solid #eee; }
+            </style>
+          </head>
+          <body>
+            <h1>Codeflow Project Documentation</h1>
+            <p>Welcome to the Codeflow project documentation. This is a comprehensive resource for understanding and contributing to Codeflow.</p>
+
+            <h2>Available Documentation</h2>
+            <ul class="doc-list">
+              <li><a href="research-report.html">Research Report</a> - Comprehensive analysis of the Codeflow codebase</li>
+              <li><a href="PRD.html">Product Requirements Document</a> - Product vision and requirements</li>
+              <li><a href="architecture.html">Architecture Overview</a> - System architecture and design patterns</li>
+              <li><a href="development.html">Development Guide</a> - Guidelines for contributing</li>
+            </ul>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
